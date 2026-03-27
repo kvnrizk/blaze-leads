@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --blaze-orange: #E8590C;
+  --bg-dark: #0A0A0A;
+}
+
+body {
+  background: var(--bg-dark);
+  color: #E5E5E5;
+}
