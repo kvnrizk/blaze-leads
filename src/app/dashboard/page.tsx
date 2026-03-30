@@ -234,8 +234,13 @@ export default function Dashboard() {
                     </td>
                     <td className="px-4 py-3 max-w-xs">
                       <p className="text-xs text-neutral-400 truncate" title={lead.bio || ''}>
-                        {lead.bio ? lead.bio.slice(0, 80) + (lead.bio.length > 80 ? '...' : '') : '—'}
+                        {lead.bio
+                          ? lead.bio.replace(/^\[r\/\w+\]\s*/i, '').slice(0, 80) + (lead.bio.length > 80 ? '...' : '')
+                          : '—'}
                       </p>
+                      {lead.source && (
+                        <span className="text-[10px] text-neutral-600">{lead.source}</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1">

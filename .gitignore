@@ -33,3 +33,6 @@ worker/data/
 
 # Claude
 .claude/
+
+.vercel
+.env*.local
