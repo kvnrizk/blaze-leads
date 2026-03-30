@@ -210,7 +210,18 @@ export default function Dashboard() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-neutral-200">
-                        {lead.platform === 'instagram' ? `@${lead.username}` : lead.username}
+                        {lead.source_url ? (
+                          <a
+                            href={lead.source_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-[#E8590C] transition-colors underline decoration-neutral-700 hover:decoration-[#E8590C]"
+                          >
+                            {lead.platform === 'instagram' ? `@${lead.username}` : lead.username}
+                          </a>
+                        ) : (
+                          lead.platform === 'instagram' ? `@${lead.username}` : lead.username
+                        )}
                       </div>
                       {lead.full_name && lead.full_name !== lead.username && (
                         <div className="text-xs text-neutral-600">{lead.full_name}</div>
