@@ -35,6 +35,35 @@ async function saveCookies(context: BrowserContext): Promise<void> {
   console.log('[Instagram] Saved cookies');
 }
 
+async function dismissDialogs(page: Page): Promise<void> {
+  // Dismiss cookie banner
+  try {
+    const cookieBtn = page.locator('button:has-text("Allow all cookies"), button:has-text("Accept"), button:has-text("Autoriser")');
+    if (await cookieBtn.isVisible({ timeout: 3000 })) {
+      await cookieBtn.click();
+      await humanDelay(1000, 2000);
+    }
+  } catch { /* No cookie banner */ }
+
+  // Dismiss "Save Login Info" / "One Tap" dialog
+  try {
+    const notNow = page.locator('button:has-text("Not Now"), button:has-text("Pas maintenant"), button:has-text("Not now")');
+    if (await notNow.isVisible({ timeout: 3000 })) {
+      await notNow.click();
+      await humanDelay(1000, 2000);
+    }
+  } catch { /* No dialog */ }
+
+  // Dismiss notifications dialog
+  try {
+    const notNow = page.locator('button:has-text("Not Now"), button:has-text("Plus tard")');
+    if (await notNow.isVisible({ timeout: 3000 })) {
+      await notNow.click();
+      await humanDelay(1000, 2000);
+    }
+  } catch { /* No dialog */ }
+}
+
 async function login(page: Page, context: BrowserContext): Promise<void> {
   const username = process.env.INSTAGRAM_USERNAME;
   const password = process.env.INSTAGRAM_PASSWORD;
@@ -44,49 +73,60 @@ async function login(page: Page, context: BrowserContext): Promise<void> {
   }
 
   console.log('[Instagram] Logging in...');
-  await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle' });
-  await humanDelay(2000, 4000);
+  await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await humanDelay(3000, 5000);
 
-  // Dismiss cookie banner if present
-  try {
-    const cookieBtn = page.locator('button:has-text("Allow all cookies"), button:has-text("Accept")');
-    if (await cookieBtn.isVisible({ timeout: 3000 })) {
-      await cookieBtn.click();
-      await humanDelay(1000, 2000);
-    }
-  } catch {
-    // No cookie banner
+  // Wait for redirect to settle — Instagram may redirect if already logged in
+  const currentUrl = page.url();
+  console.log('[Instagram] Current URL after navigation: ' + currentUrl);
+  if (!currentUrl.includes('/accounts/login')) {
+    console.log('[Instagram] Already logged in (redirected to: ' + currentUrl + ')');
+    await dismissDialogs(page);
+    await saveCookies(context);
+    return;
   }
 
-  await page.fill('input[name="username"]', username);
+  // Check if login form actually exists — if not, we're logged in
+  const loginFormVisible = await page.locator('input[name="username"], input[type="text"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+  if (!loginFormVisible) {
+    console.log('[Instagram] No login form found — already logged in');
+    await dismissDialogs(page);
+    await saveCookies(context);
+    return;
+  }
+
+  await dismissDialogs(page);
+
+  // Fill login form
+  const usernameInput = page.locator('input[name="username"], input[type="text"]').first();
+  await usernameInput.waitFor({ state: 'visible', timeout: 15000 });
+  await usernameInput.clear();
+  await usernameInput.fill(username);
   await humanDelay(500, 1000);
-  await page.fill('input[name="password"]', password);
+  const passwordInput = page.locator('input[name="password"], input[type="password"]').first();
+  await passwordInput.fill(password);
   await humanDelay(500, 1000);
-  await page.click('button[type="submit"]');
-  await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
-  await humanDelay(2000, 4000);
 
-  // Dismiss "Save Login Info" dialog if present
-  try {
-    const notNow = page.locator('button:has-text("Not Now"), button:has-text("Pas maintenant")');
-    if (await notNow.isVisible({ timeout: 3000 })) {
-      await notNow.click();
-      await humanDelay(1000, 2000);
-    }
-  } catch {
-    // No dialog
-  }
+  // Click login button
+  const loginBtn = page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Log In")').first();
+  await loginBtn.click();
+  console.log('[Instagram] Clicked login button, waiting for navigation...');
 
-  // Dismiss notifications dialog if present
+  // Wait up to 30s for page to leave login
   try {
-    const notNow = page.locator('button:has-text("Not Now"), button:has-text("Plus tard")');
-    if (await notNow.isVisible({ timeout: 3000 })) {
-      await notNow.click();
-      await humanDelay(1000, 2000);
-    }
+    await page.waitForURL((url) => !url.toString().includes('/accounts/login'), { timeout: 30000 });
   } catch {
-    // No dialog
+    // Check if we're still on login — might be wrong password
+    const stillOnLogin = page.url().includes('/accounts/login');
+    if (stillOnLogin) {
+      const errorMsg = await page.locator('#slfErrorAlert, [role="alert"], p[data-testid="login-error-message"]').textContent().catch(() => '');
+      throw new Error(`Login failed — still on login page. Error: ${errorMsg || 'unknown'}`);
+    }
   }
+  await humanDelay(3000, 5000);
+
+  // Handle post-login dialogs
+  await dismissDialogs(page);
 
   await saveCookies(context);
   console.log('[Instagram] Login successful');
@@ -94,10 +134,14 @@ async function login(page: Page, context: BrowserContext): Promise<void> {
 
 async function isLoggedIn(page: Page): Promise<boolean> {
   try {
-    await page.goto('https://www.instagram.com/', { waitUntil: 'networkidle' });
-    await humanDelay(2000, 3000);
-    // Check if we see the profile icon or search icon (logged-in indicators)
-    const loggedIn = await page.locator('svg[aria-label="Home"], svg[aria-label="Accueil"]').isVisible({ timeout: 5000 });
+    await page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await humanDelay(3000, 5000);
+    await dismissDialogs(page);
+    // If we're on the homepage (not redirected to login), we're logged in
+    const url = page.url();
+    if (url.includes('/accounts/login')) return false;
+    // Double-check with a visual element
+    const loggedIn = await page.locator('svg[aria-label="Home"], svg[aria-label="Accueil"], a[href="/"]').first().isVisible({ timeout: 5000 });
     return loggedIn;
   } catch {
     return false;
@@ -126,6 +170,9 @@ export async function scrapeHashtags(browser: Browser): Promise<string[]> {
 
   if (!hasCookies || !(await isLoggedIn(page))) {
     await login(page, context);
+  } else {
+    console.log('[Instagram] Already logged in via cookies');
+    await saveCookies(context);
   }
 
   const usernames = new Set<string>();
@@ -141,35 +188,60 @@ export async function scrapeHashtags(browser: Browser): Promise<string[]> {
 
     console.log(`[Instagram] Scraping #${hashtag}...`);
     try {
-      await page.goto(`https://www.instagram.com/explore/tags/${hashtag}/`, { waitUntil: 'networkidle' });
-      await humanDelay(CONFIG.delays.instagram.min, CONFIG.delays.instagram.max);
+      await page.goto(`https://www.instagram.com/explore/tags/${hashtag}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // Wait for SPA content to render
+      await humanDelay(5000, 8000);
+      await dismissDialogs(page);
 
-      // Extract post links from the grid
-      const postLinks = await page.locator('article a[href*="/p/"]').all();
-      const limit = Math.min(postLinks.length, maxPosts);
+      // Extract post shortcodes from the grid links
+      const postLinks = await page.locator('a[href*="/p/"]').all();
+      console.log(`[Instagram] Found ${postLinks.length} post links on #${hashtag}`);
 
-      for (let i = 0; i < limit; i++) {
+      // Collect all hrefs first (fast, no navigation)
+      const hrefs: string[] = [];
+      for (const link of postLinks.slice(0, maxPosts)) {
+        const href = await link.getAttribute('href').catch(() => null);
+        if (href) hrefs.push(href);
+      }
+
+      // For each post, fetch the JSON endpoint to get the author
+      for (const href of hrefs) {
         try {
-          const href = await postLinks[i].getAttribute('href');
-          if (!href) continue;
+          const jsonUrl = `https://www.instagram.com${href}?__a=1&__d=dis`;
+          const resp = await page.evaluate(async (url: string) => {
+            const r = await fetch(url, { credentials: 'include' });
+            if (!r.ok) return null;
+            return r.json();
+          }, jsonUrl);
 
-          await page.goto(`https://www.instagram.com${href}`, { waitUntil: 'networkidle' });
-          await humanDelay(CONFIG.delays.instagram.min, CONFIG.delays.instagram.max);
-
-          // Extract the post author username
-          const authorLink = page.locator('header a[href*="/"]').first();
-          const authorHref = await authorLink.getAttribute('href');
-          if (authorHref) {
-            const username = authorHref.replace(/\//g, '');
-            if (username && username !== 'explore') {
-              usernames.add(username);
-            }
+          if (resp?.items?.[0]?.user?.username) {
+            usernames.add(resp.items[0].user.username);
+          } else if (resp?.graphql?.shortcode_media?.owner?.username) {
+            usernames.add(resp.graphql.shortcode_media.owner.username);
           }
-        } catch (err) {
-          console.warn(`[Instagram] Error extracting post:`, err);
+        } catch {
+          // JSON endpoint blocked — fall back to page scraping
+          try {
+            await page.goto(`https://www.instagram.com${href}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await humanDelay(2000, 3000);
+            // Try to extract username from page meta or header
+            const metaContent = await page.locator('meta[property="og:description"]').getAttribute('content').catch(() => '');
+            const ownerMatch = metaContent?.match(/^[\d,.]+ likes, [\d,.]+ comments - (.+?) on Instagram/i);
+            if (ownerMatch) {
+              // Extract from "X on Instagram" — not the username but close
+            }
+            // Try header link
+            const authorHref = await page.locator('a[href*="/"][role="link"] span').first().textContent().catch(() => '');
+            if (authorHref && !authorHref.includes(' ')) {
+              usernames.add(authorHref);
+            }
+          } catch {
+            // Skip this post
+          }
         }
 
         if (usernames.size >= CONFIG.instagram.maxProfilesPerRun) break;
+        await humanDelay(1000, 2000);
       }
     } catch (err) {
       console.warn(`[Instagram] Error scraping #${hashtag}:`, err);
@@ -199,7 +271,7 @@ export async function enrichProfiles(browser: Browser, usernames: string[]): Pro
   for (const username of usernames) {
     try {
       console.log(`[Instagram] Enriching @${username}...`);
-      await page.goto(`https://www.instagram.com/${username}/`, { waitUntil: 'networkidle' });
+      await page.goto(`https://www.instagram.com/${username}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await humanDelay(CONFIG.delays.instagram.min, CONFIG.delays.instagram.max);
 
       // Extract profile data from meta tags and page content

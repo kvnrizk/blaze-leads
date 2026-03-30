@@ -24,7 +24,7 @@ export const CONFIG = {
   },
 
   reddit: {
-    subreddits: ['BigBudgetBrides', 'weddingplanning', 'ProposalParis'],
+    subreddits: ['BigBudgetBrides', 'weddingplanning', 'DestinationWedding'],
     maxPostsPerSubreddit: 100,
   },
 
@@ -50,8 +50,8 @@ export const CONFIG = {
     'https://www.leblogdemadamec.fr/',
     'https://www.lamarieeencolere.com/',
     'https://www.lamarieeauxpiedsnus.com/',
-    'https://www.preparetonmariage.fr/',
-    'https://danielle-moss.com/',
+    'https://www.zankyou.fr/p/blog',
+    'https://www.mywedding.fr/',
   ],
 
   scoring: {
