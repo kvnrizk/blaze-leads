@@ -1,9 +1,26 @@
 import { neon } from '@neondatabase/serverless';
 
-export const sql = neon(process.env.DATABASE_URL!);
+const DATABASE_URL = process.env.DATABASE_URL;
 
-export async function initDb() {
-  // Leads table — all scraped profiles/users across platforms
+if (!DATABASE_URL) {
+  throw new Error('DATABASE_URL environment variable is required');
+}
+
+export const sql = neon(DATABASE_URL);
+
+export async function testConnection() {
+  try {
+    await sql`SELECT 1`;
+    console.log('[DB] Connected to Neon Postgres');
+    return true;
+  } catch (err) {
+    console.error('[DB] Connection failed:', err);
+    return false;
+  }
+}
+
+export async function initSchema() {
+  // Leads table
   await sql`
     CREATE TABLE IF NOT EXISTS leads (
       id SERIAL PRIMARY KEY,
@@ -36,7 +53,7 @@ export async function initDb() {
     )
   `;
 
-  // Outreach tracking — one lead can have multiple outreach attempts
+  // Outreach tracking
   await sql`
     CREATE TABLE IF NOT EXISTS outreach (
       id SERIAL PRIMARY KEY,
@@ -51,7 +68,7 @@ export async function initDb() {
     )
   `;
 
-  // Scrape run history
+  // Scrape runs
   await sql`
     CREATE TABLE IF NOT EXISTS scrape_runs (
       id SERIAL PRIMARY KEY,
@@ -65,7 +82,7 @@ export async function initDb() {
     )
   `;
 
-  // Rate limits — per-platform daily tracking
+  // Rate limits
   await sql`
     CREATE TABLE IF NOT EXISTS rate_limits (
       id SERIAL PRIMARY KEY,
@@ -79,7 +96,7 @@ export async function initDb() {
     )
   `;
 
-  // Seed rate limits with defaults
+  // Seed defaults
   await sql`
     INSERT INTO rate_limits (platform, action, daily_limit)
     VALUES
@@ -92,7 +109,7 @@ export async function initDb() {
     ON CONFLICT (platform, action) DO NOTHING
   `;
 
-  // System config — key/value for pause/resume, manual triggers, etc.
+  // System config
   await sql`
     CREATE TABLE IF NOT EXISTS system_config (
       key VARCHAR(100) PRIMARY KEY,
@@ -108,4 +125,6 @@ export async function initDb() {
       ('trigger_scrape', 'false')
     ON CONFLICT (key) DO NOTHING
   `;
+
+  console.log('[DB] Schema initialized');
 }

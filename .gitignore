@@ -25,3 +25,11 @@ npm-debug.log*
 # IDE
 .vscode/
 .idea/
+
+# worker
+worker/node_modules/
+worker/dist/
+worker/data/
+
+# Claude
+.claude/
