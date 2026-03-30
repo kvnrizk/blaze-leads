@@ -16,6 +16,11 @@ export const CONFIG = {
     maxProfilesPerRun: 50,
     maxDmsPerDay: 5,
     maxCommentsPerDay: 10,
+    // Auto-DM and auto-comment are OFF by default to protect Sam's account.
+    // Sam receives drafted messages via Telegram and sends them manually.
+    // Set to true only if using a dedicated outreach account (not Blaze main).
+    autoDmEnabled: false,
+    autoCommentEnabled: false,
   },
 
   reddit: {

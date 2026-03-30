@@ -115,6 +115,26 @@ export async function sendDailyReport(): Promise<void> {
       }
     }
 
+    // Drafted messages ready for Sam to copy-paste
+    const drafts = await sql`
+      SELECT username, lead_type, total_score, draft_message, platform
+      FROM leads
+      WHERE drafted_at >= CURRENT_DATE
+        AND dm_sent_at IS NULL
+        AND draft_message IS NOT NULL
+      ORDER BY total_score DESC
+      LIMIT 5
+    `;
+
+    if (drafts.length > 0) {
+      report += `\n<b>📝 Ready to Send (copy-paste)</b>\n`;
+      for (const d of drafts) {
+        const handle = d.platform === 'instagram' ? `@${d.username}` : d.username;
+        report += `\n<b>${handle}</b> (${d.lead_type}, ${d.total_score}pts):\n`;
+        report += `<i>${d.draft_message}</i>\n`;
+      }
+    }
+
     report += `\n🤖 <i>Blaze Worker — automated lead generation</i>`;
 
     await sendTelegram(report);

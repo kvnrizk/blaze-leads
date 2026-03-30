@@ -103,8 +103,12 @@ export function startScheduler(): void {
     timezone: tz,
   });
 
-  // 09:30 — Auto-comment on Instagram (checks pause flag)
+  // 09:30 — Auto-comment on Instagram (disabled by default — protect Sam's account)
   cron.schedule('30 9 * * *', async () => {
+    if (!CONFIG.instagram.autoCommentEnabled) {
+      console.log('[Scheduler] Skipping Auto-Comment — disabled in config (account safety)');
+      return;
+    }
     if (await isAutomationPaused()) {
       console.log('[Scheduler] Skipping Auto-Comment — automation paused');
       return;
@@ -112,8 +116,12 @@ export function startScheduler(): void {
     await safeRun('Auto-Comment', () => autoComment());
   }, { timezone: tz });
 
-  // 10:00 — Auto-DM on Instagram (checks pause flag)
+  // 10:00 — Auto-DM on Instagram (disabled by default — protect Sam's account)
   cron.schedule('0 10 * * *', async () => {
+    if (!CONFIG.instagram.autoDmEnabled) {
+      console.log('[Scheduler] Skipping Auto-DM — disabled in config (account safety)');
+      return;
+    }
     if (await isAutomationPaused()) {
       console.log('[Scheduler] Skipping Auto-DM — automation paused');
       return;
