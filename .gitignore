@@ -36,3 +36,4 @@ worker/data/
 
 .vercel
 .env*.local
+worker/undefined/
