@@ -1,7 +1,11 @@
 import { Resend } from 'resend';
 import type { Lead } from './types';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+function getResend() {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) throw new Error('RESEND_API_KEY not configured');
+  return new Resend(key);
+}
 
 export async function sendDigestEmail(
   to: string,
@@ -41,7 +45,7 @@ export async function sendDigestEmail(
   `;
 
   try {
-    await resend.emails.send({
+    await getResend().emails.send({
       from: 'Blaze <onboarding@resend.dev>',
       to,
       subject,
