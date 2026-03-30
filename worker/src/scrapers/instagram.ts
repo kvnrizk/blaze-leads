@@ -81,12 +81,43 @@ async function isLoggedIn(page: Page): Promise<boolean> {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(4000);
+
     const url = page.url();
+    console.log(`[instagram] isLoggedIn check — URL: ${url}`);
+
+    // If redirected to login, definitely not logged in
     if (url.includes('/accounts/login')) return false;
-    const nav = await page.$('nav[role="navigation"]');
-    return !!nav;
-  } catch {
+
+    // If we're on the homepage or any non-login page, we're logged in
+    // Try multiple indicators
+    const indicators = [
+      'nav[role="navigation"]',
+      'svg[aria-label="Home"]',
+      'svg[aria-label="Accueil"]',
+      'a[href="/direct/inbox/"]',
+      'a[href="/explore/"]',
+      'span[role="link"]',
+    ];
+
+    for (const selector of indicators) {
+      const el = await page.$(selector);
+      if (el) {
+        console.log(`[instagram] Logged in — found: ${selector}`);
+        return true;
+      }
+    }
+
+    // If URL is instagram.com (not login) and page has content, assume logged in
+    if (url === 'https://www.instagram.com/' || url.startsWith('https://www.instagram.com/?')) {
+      console.log('[instagram] On homepage without login redirect — assuming logged in');
+      return true;
+    }
+
+    console.log('[instagram] Could not confirm login status');
+    return false;
+  } catch (err) {
+    console.log('[instagram] isLoggedIn error:', err);
     return false;
   }
 }
@@ -121,7 +152,7 @@ async function loginWithCredentials(page: Page, context: BrowserContext): Promis
 
   try {
     await page.goto('https://www.instagram.com/accounts/login/', {
-      waitUntil: 'networkidle',
+      waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
 
@@ -182,17 +213,26 @@ async function interceptHashtagAPI(
 
     if (
       url.includes('/api/v1/tags/') ||
+      url.includes('/api/v1/feed/tag/') ||
       url.includes('/graphql/query') ||
       url.includes('tag_media') ||
-      url.includes('sections/?')
+      url.includes('sections')
     ) {
       try {
         const response = await route.fetch();
         const contentType = response.headers()['content-type'] || '';
+        const status = response.status();
 
-        if (contentType.includes('json')) {
+        if (contentType.includes('json') && status === 200) {
           const json = await response.json().catch(() => null);
-          if (json) extractUsersFromResponse(json, collectedPosts);
+          if (json) {
+            const before = collectedPosts.length;
+            extractUsersFromResponse(json, collectedPosts);
+            const found = collectedPosts.length - before;
+            if (found > 0) {
+              console.log(`[instagram] API intercepted: ${found} users from ${url.split('?')[0].slice(-60)}`);
+            }
+          }
         }
 
         await route.fulfill({ response });
@@ -281,17 +321,20 @@ async function scrapeHashtag(
   console.log(`[instagram] Scraping #${hashtag}`);
   try {
     await page.goto(`https://www.instagram.com/explore/tags/${hashtag}/`, {
-      waitUntil: 'networkidle',
-      timeout: 45000,
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
     });
 
-    await page.waitForTimeout(5000 + Math.random() * 3000);
+    // Wait for SPA to fire API calls
+    await page.waitForTimeout(6000 + Math.random() * 3000);
 
     // Scroll to trigger more API loads
     await page.evaluate(() => window.scrollBy(0, 800));
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
     await page.evaluate(() => window.scrollBy(0, 800));
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
+
+    console.log(`[instagram] Intercepted ${collectedPosts.length} posts so far`);
 
   } catch (err) {
     console.warn(`[instagram] Navigation warning for #${hashtag}:`, err);
