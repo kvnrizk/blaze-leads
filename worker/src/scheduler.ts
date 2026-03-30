@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { CONFIG } from './config.js';
 import { sql } from './lib/db.js';
-import { scrapeInstagram } from './scrapers/instagram.js';
+import { scrapeInstagramHashtags, enrichInstagramProfiles } from './scrapers/instagram.js';
 import { scrapeReddit } from './scrapers/reddit.js';
 import { scrapeDirectories } from './scrapers/directories.js';
 import { scrapeFacebook } from './scrapers/facebook.js';
@@ -38,7 +38,8 @@ async function checkAndClearScrapeTriger(): Promise<boolean> {
 }
 
 async function runAllScrapers(): Promise<void> {
-  await safeRun('Instagram Hashtags', scrapeInstagram);
+  await safeRun('Instagram Hashtags', scrapeInstagramHashtags);
+  await safeRun('Instagram Profiles', enrichInstagramProfiles);
   await safeRun('Reddit', scrapeReddit);
   await safeRun('Directories', () => scrapeDirectories());
   await safeRun('Facebook', () => scrapeFacebook());
@@ -65,13 +66,13 @@ async function safeRun(name: string, fn: () => Promise<void>): Promise<void> {
 export function startScheduler(): void {
   console.log('[Scheduler] Setting up cron jobs (timezone: Europe/Paris)...');
 
-  // 06:00 — Instagram hashtag scrape
-  cron.schedule('0 6 * * *', () => safeRun('Instagram Hashtags', scrapeInstagram), {
+  // 06:00 — Instagram hashtag scrape (API interception)
+  cron.schedule('0 6 * * *', () => safeRun('Instagram Hashtags', scrapeInstagramHashtags), {
     timezone: tz,
   });
 
-  // 06:45 — Instagram profile enrichment (already done in scrapeInstagram, but can re-run for missed)
-  cron.schedule('45 6 * * *', () => safeRun('Instagram Profiles', scrapeInstagram), {
+  // 06:45 — Instagram profile enrichment (visits each profile for bio/followers)
+  cron.schedule('45 6 * * *', () => safeRun('Instagram Profiles', enrichInstagramProfiles), {
     timezone: tz,
   });
 
