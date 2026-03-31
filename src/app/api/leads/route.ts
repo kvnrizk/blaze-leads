@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
     let paramIdx = 1;
 
     if (source) {
-      query += ` AND source = $${paramIdx++}`;
+      query += ` AND platform = $${paramIdx++}`;
       params.push(source);
     }
     if (leadType) {
