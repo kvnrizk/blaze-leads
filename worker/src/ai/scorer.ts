@@ -119,7 +119,7 @@ export async function scoreAllUnscored(): Promise<number> {
     SELECT id, username, bio, followers, post_count, external_url,
            email, is_private, platform
     FROM leads
-    WHERE total_score IS NULL OR total_score = 0
+    WHERE scored_at IS NULL
     ORDER BY scraped_at DESC
     LIMIT 200
   `;
