@@ -3,12 +3,14 @@
  *
  * Strategy:
  * 1. Persistent browser context — same fingerprint, session, and cookies every run
- * 2. API interception — captures Instagram's internal GraphQL responses to extract
- *    usernames reliably, without scraping unstable DOM selectors
- * 3. Manual login once via `npm run save-login`, then fully automated forever
+ * 2. THREE extraction methods tried in order:
+ *    a) Response listener — passively captures Instagram's internal API responses
+ *    b) Script tag extraction — reads embedded JSON from page source
+ *    c) Meta tag extraction — reads og:description for basic profile info
+ * 3. Manual login once via --login flag, then fully automated forever
  */
 
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, BrowserContext, Page, Response } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import { sql } from '../lib/db.js';
@@ -44,7 +46,6 @@ interface CapturedPost {
 // ─── Browser launch ───────────────────────────────────────────────────────────
 
 async function launchContext(): Promise<BrowserContext> {
-  // Ensure profile dir exists
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
@@ -65,7 +66,6 @@ async function launchContext(): Promise<BrowserContext> {
     ],
   });
 
-  // Stealth: remove webdriver flag
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
@@ -84,40 +84,27 @@ async function isLoggedIn(page: Page): Promise<boolean> {
     await page.waitForTimeout(4000);
 
     const url = page.url();
-    console.log(`[instagram] isLoggedIn check — URL: ${url}`);
-
-    // If redirected to login, definitely not logged in
     if (url.includes('/accounts/login')) return false;
 
-    // If we're on the homepage or any non-login page, we're logged in
-    // Try multiple indicators
+    // If on homepage (not login), we're logged in
+    if (url === 'https://www.instagram.com/' || url.startsWith('https://www.instagram.com/?')) {
+      return true;
+    }
+
+    // Check for any logged-in indicator
     const indicators = [
       'nav[role="navigation"]',
       'svg[aria-label="Home"]',
       'svg[aria-label="Accueil"]',
       'a[href="/direct/inbox/"]',
       'a[href="/explore/"]',
-      'span[role="link"]',
     ];
-
-    for (const selector of indicators) {
-      const el = await page.$(selector);
-      if (el) {
-        console.log(`[instagram] Logged in — found: ${selector}`);
-        return true;
-      }
+    for (const sel of indicators) {
+      if (await page.$(sel)) return true;
     }
 
-    // If URL is instagram.com (not login) and page has content, assume logged in
-    if (url === 'https://www.instagram.com/' || url.startsWith('https://www.instagram.com/?')) {
-      console.log('[instagram] On homepage without login redirect — assuming logged in');
-      return true;
-    }
-
-    console.log('[instagram] Could not confirm login status');
     return false;
-  } catch (err) {
-    console.log('[instagram] isLoggedIn error:', err);
+  } catch {
     return false;
   }
 }
@@ -125,13 +112,11 @@ async function isLoggedIn(page: Page): Promise<boolean> {
 async function loginWithCookies(context: BrowserContext): Promise<boolean> {
   if (!fs.existsSync(COOKIES_FILE)) return false;
   try {
-    const raw = fs.readFileSync(COOKIES_FILE, 'utf-8');
-    const cookies = JSON.parse(raw);
+    const cookies = JSON.parse(fs.readFileSync(COOKIES_FILE, 'utf-8'));
     await context.addCookies(cookies);
     console.log('[instagram] Loaded cookies from file');
     return true;
   } catch {
-    console.log('[instagram] Cookie file invalid, skipping');
     return false;
   }
 }
@@ -139,14 +124,13 @@ async function loginWithCookies(context: BrowserContext): Promise<boolean> {
 async function saveCookies(context: BrowserContext): Promise<void> {
   const cookies = await context.cookies();
   fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
-  console.log('[instagram] Cookies saved');
 }
 
 async function loginWithCredentials(page: Page, context: BrowserContext): Promise<boolean> {
   const username = process.env.INSTAGRAM_USERNAME;
   const password = process.env.INSTAGRAM_PASSWORD;
   if (!username || !password) {
-    console.error('[instagram] No credentials in environment — set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD');
+    console.error('[instagram] No credentials — set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD');
     return false;
   }
 
@@ -155,25 +139,41 @@ async function loginWithCredentials(page: Page, context: BrowserContext): Promis
       waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
+    await page.waitForTimeout(3000);
 
-    await page.waitForSelector('input[name="username"]', { timeout: 10000 });
-    await humanDelay(1000, 2000);
+    // Check if we got redirected (already logged in)
+    if (!page.url().includes('/accounts/login')) {
+      await dismissDialogs(page);
+      await saveCookies(context);
+      return true;
+    }
 
-    await page.fill('input[name="username"]', username);
+    // Try to find and fill the login form
+    const usernameInput = await page.$('input[name="username"], input[type="text"]');
+    if (!usernameInput) {
+      console.log('[instagram] No login form found — may already be logged in');
+      return !page.url().includes('/accounts/login');
+    }
+
+    await usernameInput.fill(username);
     await humanDelay(400, 900);
-    await page.fill('input[name="password"]', password);
-    await humanDelay(600, 1200);
-    await page.click('button[type="submit"]');
 
-    await page.waitForTimeout(4000);
+    const passwordInput = await page.$('input[name="password"], input[type="password"]');
+    if (passwordInput) {
+      await passwordInput.fill(password);
+      await humanDelay(600, 1200);
+    }
+
+    const submitBtn = await page.$('button[type="submit"]');
+    if (submitBtn) await submitBtn.click();
+
+    await page.waitForTimeout(5000);
     await dismissDialogs(page);
 
-    const loggedIn = await isLoggedIn(page);
+    const loggedIn = !page.url().includes('/accounts/login');
     if (loggedIn) {
       await saveCookies(context);
-      console.log('[instagram] Login successful, session saved');
-    } else {
-      console.error('[instagram] Login failed — check credentials or 2FA');
+      console.log('[instagram] Login successful');
     }
     return loggedIn;
   } catch (err) {
@@ -190,11 +190,13 @@ async function dismissDialogs(page: Page): Promise<void> {
     'button:has-text("Not Now")',
     'button:has-text("Plus tard")',
     'button:has-text("Ignorer")',
+    'button:has-text("Not now")',
+    'button:has-text("Pas maintenant")',
   ];
   for (const selector of dismissers) {
     try {
       const btn = await page.$(selector);
-      if (btn) {
+      if (btn && await btn.isVisible()) {
         await btn.click();
         await page.waitForTimeout(1000);
       }
@@ -202,149 +204,281 @@ async function dismissDialogs(page: Page): Promise<void> {
   }
 }
 
-// ─── API interception ─────────────────────────────────────────────────────────
+async function authenticate(context: BrowserContext, page: Page): Promise<boolean> {
+  let loggedIn = await isLoggedIn(page);
 
-async function interceptHashtagAPI(
-  page: Page,
-  collectedPosts: CapturedPost[]
-): Promise<void> {
-  await page.route('**', async (route) => {
-    const url = route.request().url();
+  if (!loggedIn) {
+    console.log('[instagram] Not logged in, trying cookies...');
+    await loginWithCookies(context);
+    loggedIn = await isLoggedIn(page);
+  }
 
-    if (
-      url.includes('/api/v1/tags/') ||
-      url.includes('/api/v1/feed/tag/') ||
-      url.includes('/graphql/query') ||
-      url.includes('tag_media') ||
-      url.includes('sections')
-    ) {
-      try {
-        const response = await route.fetch();
-        const contentType = response.headers()['content-type'] || '';
-        const status = response.status();
+  if (!loggedIn) {
+    console.log('[instagram] Trying credentials...');
+    loggedIn = await loginWithCredentials(page, context);
+  }
 
-        if (contentType.includes('json') && status === 200) {
-          const json = await response.json().catch(() => null);
-          if (json) {
-            const before = collectedPosts.length;
-            extractUsersFromResponse(json, collectedPosts);
-            const found = collectedPosts.length - before;
-            if (found > 0) {
-              console.log(`[instagram] API intercepted: ${found} users from ${url.split('?')[0].slice(-60)}`);
-            }
-          }
-        }
+  if (!loggedIn) {
+    console.error('[instagram] Cannot authenticate — aborting');
+    await page.screenshot({ path: `${SCREENSHOT_DIR}/instagram-auth-fail.png` });
+  } else {
+    console.log('[instagram] Authenticated ✓');
+    await dismissDialogs(page);
+  }
 
-        await route.fulfill({ response });
-      } catch {
-        await route.continue();
+  return loggedIn;
+}
+
+// ─── Extraction methods ───────────────────────────────────────────────────────
+
+/**
+ * Method 1: Passive response listener.
+ * Listens for ALL responses and extracts user data from JSON responses.
+ */
+function setupResponseListener(page: Page, collected: CapturedPost[]): void {
+  page.on('response', async (response: Response) => {
+    try {
+      const url = response.url();
+      const status = response.status();
+
+      // Only process JSON responses from Instagram's API
+      if (status !== 200) return;
+      if (!url.includes('instagram.com')) return;
+
+      const isApi =
+        url.includes('/api/v1/') ||
+        url.includes('/graphql') ||
+        url.includes('/web/') ||
+        url.includes('query_hash') ||
+        url.includes('doc_id');
+
+      if (!isApi) return;
+
+      const contentType = response.headers()['content-type'] || '';
+      if (!contentType.includes('json')) return;
+
+      const body = await response.body().catch(() => null);
+      if (!body) return;
+
+      const json = JSON.parse(body.toString());
+      const before = collected.length;
+      deepExtractUsers(json, collected);
+
+      const found = collected.length - before;
+      if (found > 0) {
+        const shortUrl = url.split('?')[0].split('instagram.com')[1] || url.slice(-60);
+        console.log(`[instagram] +${found} users from ${shortUrl}`);
       }
-    } else {
-      await route.continue();
+    } catch {
+      // Silently skip non-JSON or failed responses
     }
   });
 }
 
-function extractUsersFromResponse(json: unknown, posts: CapturedPost[]): void {
-  const data = json as Record<string, unknown>;
+/**
+ * Recursively walks any JSON structure looking for objects with a `username` field
+ * that look like Instagram user objects.
+ */
+function deepExtractUsers(obj: unknown, posts: CapturedPost[], depth = 0): void {
+  if (depth > 15 || !obj || typeof obj !== 'object') return;
 
-  // Pattern 1: /api/v1/tags/{tag}/sections/
-  if (data.sections && Array.isArray(data.sections)) {
-    for (const section of data.sections as Record<string, unknown>[]) {
-      const medias =
-        (section.layout_content as Record<string, unknown>)?.medias;
-      if (Array.isArray(medias)) {
-        for (const item of medias as Record<string, unknown>[]) {
-          const user = (item.media as Record<string, unknown>)?.user as
-            | Record<string, unknown>
-            | undefined;
-          if (user?.username) {
-            posts.push({
-              username: String(user.username),
-              full_name: user.full_name ? String(user.full_name) : undefined,
-              followers: user.follower_count
-                ? Number(user.follower_count)
-                : undefined,
-              is_private: Boolean(user.is_private),
-            });
-          }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      deepExtractUsers(item, posts, depth + 1);
+    }
+    return;
+  }
+
+  const record = obj as Record<string, unknown>;
+
+  // Check if this object looks like a user
+  if (
+    typeof record.username === 'string' &&
+    record.username.length > 0 &&
+    record.username.length < 50 &&
+    !record.username.includes(' ')
+  ) {
+    // Verify it's likely a user object (has at least one other user-like field)
+    const hasUserFields =
+      'full_name' in record ||
+      'follower_count' in record ||
+      'is_private' in record ||
+      'profile_pic_url' in record ||
+      'pk' in record ||
+      'pk_id' in record;
+
+    if (hasUserFields) {
+      posts.push({
+        username: String(record.username),
+        full_name: record.full_name ? String(record.full_name) : undefined,
+        followers: record.follower_count ? Number(record.follower_count) : undefined,
+        is_private: record.is_private ? Boolean(record.is_private) : undefined,
+      });
+      return; // Don't recurse into user's nested objects
+    }
+  }
+
+  // Recurse into all values
+  for (const value of Object.values(record)) {
+    deepExtractUsers(value, posts, depth + 1);
+  }
+}
+
+/**
+ * Method 2: Extract from embedded script tags.
+ * Instagram embeds initial data in script tags as JSON.
+ */
+async function extractFromScriptTags(page: Page): Promise<CapturedPost[]> {
+  const posts: CapturedPost[] = [];
+
+  try {
+    const scripts = await page.evaluate(() => {
+      const results: string[] = [];
+      document.querySelectorAll('script[type="application/json"]').forEach((el) => {
+        if (el.textContent && el.textContent.length > 100) {
+          results.push(el.textContent);
+        }
+      });
+      // Also check for window.__additionalDataLoaded or similar
+      const allScripts = document.querySelectorAll('script:not([src])');
+      allScripts.forEach((el) => {
+        const text = el.textContent || '';
+        if (
+          text.includes('username') &&
+          (text.includes('edge_hashtag_to_media') ||
+            text.includes('tag_media') ||
+            text.includes('sections'))
+        ) {
+          results.push(text);
+        }
+      });
+      return results;
+    });
+
+    for (const scriptText of scripts) {
+      try {
+        // Try to parse as JSON directly
+        const json = JSON.parse(scriptText);
+        deepExtractUsers(json, posts);
+      } catch {
+        // Try to extract JSON from script content (e.g., window.__data = {...})
+        const jsonMatch = scriptText.match(/\{[\s\S]*"username"[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            const json = JSON.parse(jsonMatch[0]);
+            deepExtractUsers(json, posts);
+          } catch { /* not valid JSON */ }
         }
       }
     }
+  } catch {
+    // Script extraction failed
   }
 
-  // Pattern 2: GraphQL edge_hashtag_to_media
-  const hashtag = data.data as Record<string, unknown> | undefined;
-  const edges =
-    (
-      (hashtag?.hashtag as Record<string, unknown>)
-        ?.edge_hashtag_to_media as Record<string, unknown>
-    )?.edges;
-  if (Array.isArray(edges)) {
-    for (const edge of edges as Record<string, unknown>[]) {
-      const node = edge.node as Record<string, unknown> | undefined;
-      const owner = node?.owner as Record<string, unknown> | undefined;
-      if (owner?.username) {
-        posts.push({ username: String(owner.username) });
-      }
-    }
-  }
+  return posts;
+}
 
-  // Pattern 3: flat items array (newer API versions)
-  if (data.items && Array.isArray(data.items)) {
-    for (const item of data.items as Record<string, unknown>[]) {
-      const user = item.user as Record<string, unknown> | undefined;
-      if (user?.username) {
-        posts.push({
-          username: String(user.username),
-          full_name: user.full_name ? String(user.full_name) : undefined,
-          followers: user.follower_count
-            ? Number(user.follower_count)
-            : undefined,
-          is_private: Boolean(user.is_private),
-        });
-      }
-    }
+/**
+ * Method 3: Extract usernames from post link hrefs + profile page.
+ * Last resort — slower but works when API is blocked.
+ */
+async function extractFromDOM(page: Page): Promise<string[]> {
+  try {
+    // Get all post links and extract shortcodes
+    const links = await page.$$eval('a[href*="/p/"]', (els) =>
+      els.map((el) => el.getAttribute('href')).filter(Boolean) as string[]
+    );
+
+    // Deduplicate
+    return [...new Set(links)];
+  } catch {
+    return [];
   }
 }
 
 // ─── Hashtag scraping ─────────────────────────────────────────────────────────
 
-async function scrapeHashtag(
-  page: Page,
-  hashtag: string
-): Promise<CapturedPost[]> {
-  const collectedPosts: CapturedPost[] = [];
+async function scrapeHashtag(page: Page, hashtag: string): Promise<CapturedPost[]> {
+  const collected: CapturedPost[] = [];
 
-  await interceptHashtagAPI(page, collectedPosts);
+  console.log(`[instagram] Scraping #${hashtag}...`);
 
-  console.log(`[instagram] Scraping #${hashtag}`);
   try {
     await page.goto(`https://www.instagram.com/explore/tags/${hashtag}/`, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
 
-    // Wait for SPA to fire API calls
+    // Wait for SPA to render and fire API calls
     await page.waitForTimeout(6000 + Math.random() * 3000);
+    await dismissDialogs(page);
 
-    // Scroll to trigger more API loads
-    await page.evaluate(() => window.scrollBy(0, 800));
-    await page.waitForTimeout(3000);
-    await page.evaluate(() => window.scrollBy(0, 800));
-    await page.waitForTimeout(3000);
+    // Scroll to trigger more loads
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+      await page.waitForTimeout(2000 + Math.random() * 1000);
+    }
 
-    console.log(`[instagram] Intercepted ${collectedPosts.length} posts so far`);
+    // Method 2: Try script tag extraction
+    const scriptPosts = await extractFromScriptTags(page);
+    if (scriptPosts.length > 0) {
+      console.log(`[instagram] Script tags: found ${scriptPosts.length} users`);
+      collected.push(...scriptPosts);
+    }
 
+    // Method 3: If still nothing, try DOM extraction for post links
+    if (collected.length === 0) {
+      const postLinks = await extractFromDOM(page);
+      console.log(`[instagram] DOM: found ${postLinks.length} post links`);
+
+      // Visit first few posts to get usernames from meta tags
+      for (const href of postLinks.slice(0, 10)) {
+        try {
+          const fullUrl = href.startsWith('http')
+            ? href
+            : `https://www.instagram.com${href}`;
+          await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await page.waitForTimeout(2000 + Math.random() * 1000);
+
+          // Extract username from meta og:description or page content
+          const username = await page.evaluate(() => {
+            // Try meta tag: "X likes, Y comments - @username on Instagram"
+            const ogDesc = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
+            const match = ogDesc.match(/@(\w+)\s+on Instagram/i) || ogDesc.match(/- (.+?) on Instagram/i);
+            if (match) return match[1].replace('@', '');
+
+            // Try canonical link
+            const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
+            const canonMatch = canonical.match(/instagram\.com\/([^/]+)\/p\//);
+            if (canonMatch) return canonMatch[1];
+
+            // Try header links
+            const headerLink = document.querySelector('header a[href*="/"][role="link"]');
+            if (headerLink) {
+              const href = headerLink.getAttribute('href');
+              if (href) return href.replace(/\//g, '');
+            }
+
+            return null;
+          });
+
+          if (username && username.length < 50 && !username.includes(' ')) {
+            collected.push({ username });
+          }
+
+          await humanDelay(1500, 3000);
+        } catch {
+          // Skip failed posts
+        }
+      }
+    }
   } catch (err) {
-    console.warn(`[instagram] Navigation warning for #${hashtag}:`, err);
+    console.warn(`[instagram] Error scraping #${hashtag}:`, err);
   }
 
-  await page.unroute('**');
-
-  // Deduplicate by username
+  // Deduplicate
   const seen = new Set<string>();
-  return collectedPosts.filter((p) => {
+  return collected.filter((p) => {
     if (seen.has(p.username)) return false;
     seen.add(p.username);
     return true;
@@ -367,10 +501,7 @@ function parseCount(str: string): number {
   return parseInt(clean, 10) || 0;
 }
 
-async function enrichProfile(
-  page: Page,
-  username: string
-): Promise<InstagramUser | null> {
+async function enrichProfile(page: Page, username: string): Promise<InstagramUser | null> {
   try {
     await page.goto(`https://www.instagram.com/${username}/`, {
       waitUntil: 'domcontentloaded',
@@ -379,10 +510,8 @@ async function enrichProfile(
     await page.waitForTimeout(2000 + Math.random() * 1500);
 
     const meta = await page.evaluate(() => {
-      const desc =
-        document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
-      const title =
-        document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
+      const desc = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+      const title = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
       return { desc, title };
     });
 
@@ -394,25 +523,34 @@ async function enrichProfile(
     const nameMatch = meta.title.match(/^(.+?)\s*\(@/);
     const fullName = nameMatch ? nameMatch[1].trim() : null;
 
-    const bio = await page
-      .$eval(
-        'section main header section > div:last-child, [data-testid="user-bio"], .-vDIg',
-        (el) => el.textContent?.trim() || ''
-      )
-      .catch(() => '');
+    // Bio: try script tag data first, then DOM
+    let bio = '';
+    try {
+      bio = await page.evaluate(() => {
+        // Try to find bio in script tags
+        const scripts = document.querySelectorAll('script[type="application/json"]');
+        for (const s of scripts) {
+          const text = s.textContent || '';
+          if (text.includes('biography')) {
+            try {
+              const json = JSON.parse(text);
+              const bioStr = JSON.stringify(json).match(/"biography":"([^"]*?)"/);
+              if (bioStr) return bioStr[1].replace(/\\n/g, '\n');
+            } catch { /* skip */ }
+          }
+        }
+        // Fallback: meta description after the counts
+        const desc = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+        const bioMatch = desc.match(/- (.+)/);
+        return bioMatch ? bioMatch[1].trim() : '';
+      });
+    } catch { /* skip */ }
 
     const externalUrl = await page
-      .$eval('a[href*="l.instagram.com"]', (el) =>
-        (el as HTMLAnchorElement).href
-      )
+      .$eval('a[href*="l.instagram.com"]', (el) => (el as HTMLAnchorElement).href)
       .catch(() => null);
 
-    const isPrivate = await page
-      .$('h2:has-text("This account is private"), h2:has-text("Ce compte est privé")')
-      .then((el) => !!el)
-      .catch(() => false);
-
-    const email = extractEmailFromText(bio);
+    const isPrivate = !!(await page.$('h2:has-text("This account is private"), h2:has-text("Ce compte est privé")'));
 
     return {
       username,
@@ -422,7 +560,7 @@ async function enrichProfile(
       post_count: postCount,
       external_url: externalUrl,
       is_private: isPrivate,
-      email,
+      email: extractEmailFromText(bio),
     };
   } catch (err) {
     console.warn(`[instagram] Could not enrich @${username}:`, err);
@@ -430,7 +568,7 @@ async function enrichProfile(
   }
 }
 
-// ─── Database save ─────────────────────────────────────────────────────────────
+// ─── Database ─────────────────────────────────────────────────────────────────
 
 async function saveLead(user: InstagramUser, sourceHashtag: string): Promise<boolean> {
   try {
@@ -452,7 +590,7 @@ async function saveLead(user: InstagramUser, sourceHashtag: string): Promise<boo
         ${user.post_count},
         ${user.external_url},
         ${user.is_private},
-        ${`instagram_hashtag_${sourceHashtag}`},
+        ${`instagram_#${sourceHashtag}`},
         ${`https://www.instagram.com/${user.username}/`},
         'other',
         0, 0, 0, 0,
@@ -464,7 +602,7 @@ async function saveLead(user: InstagramUser, sourceHashtag: string): Promise<boo
     `;
     return result.length > 0;
   } catch (err) {
-    console.error(`[instagram] DB save error for @${user.username}:`, err);
+    console.error(`[instagram] DB error for @${user.username}:`, err);
     return false;
   }
 }
@@ -480,60 +618,57 @@ export async function scrapeInstagramHashtags(): Promise<void> {
   const context = await launchContext();
   const page = await context.newPage();
 
+  // Set up passive response listener BEFORE any navigation
+  const apiCollected: CapturedPost[] = [];
+  setupResponseListener(page, apiCollected);
+
   try {
-    let loggedIn = await isLoggedIn(page);
-
-    if (!loggedIn) {
-      console.log('[instagram] Not logged in via profile, trying cookies...');
-      await loginWithCookies(context);
-      loggedIn = await isLoggedIn(page);
-    }
-
-    if (!loggedIn) {
-      console.log('[instagram] Trying credentials...');
-      loggedIn = await loginWithCredentials(page, context);
-    }
-
-    if (!loggedIn) {
-      console.error('[instagram] Cannot authenticate — aborting');
-      await page.screenshot({ path: `${SCREENSHOT_DIR}/instagram-auth-fail.png` });
-      return;
-    }
-
-    console.log('[instagram] Authenticated ✓');
-    await dismissDialogs(page);
+    if (!(await authenticate(context, page))) return;
 
     const hashtags = CONFIG.instagram.hashtags;
-    const allUsernames = new Set<string>();
+    const allPosts: CapturedPost[] = [];
     let totalNew = 0;
 
     for (const hashtag of hashtags) {
-      const posts = await scrapeHashtag(page, hashtag);
-      console.log(`[instagram] #${hashtag}: captured ${posts.length} users via API interception`);
+      // Reset API collector for this hashtag
+      const beforeApi = apiCollected.length;
 
-      for (const post of posts) {
-        allUsernames.add(post.username);
-      }
+      const domPosts = await scrapeHashtag(page, hashtag);
 
-      await humanDelay(
-        CONFIG.delays.instagram.min,
-        CONFIG.delays.instagram.max
+      // Merge API-intercepted posts from this navigation
+      const apiPosts = apiCollected.slice(beforeApi);
+      const combined = [...domPosts, ...apiPosts];
+
+      // Deduplicate
+      const seen = new Set(allPosts.map((p) => p.username));
+      const newPosts = combined.filter((p) => {
+        if (seen.has(p.username)) return false;
+        seen.add(p.username);
+        return true;
+      });
+
+      allPosts.push(...newPosts);
+      console.log(
+        `[instagram] #${hashtag}: ${newPosts.length} new (${domPosts.length} DOM + ${apiPosts.length} API)`
       );
+
+      await humanDelay(CONFIG.delays.instagram.min, CONFIG.delays.instagram.max);
     }
 
-    console.log(`[instagram] Total unique usernames: ${allUsernames.size}`);
+    console.log(`[instagram] Total unique users: ${allPosts.length}`);
 
-    for (const username of allUsernames) {
+    // Save all leads
+    for (const post of allPosts) {
       const isNew = await saveLead(
         {
-          username,
-          full_name: null,
+          username: post.username,
+          full_name: post.full_name || null,
           bio: null,
           email: null,
-          followers: 0,
+          followers: post.followers || 0,
           post_count: 0,
           external_url: null,
-          is_private: false,
+          is_private: post.is_private || false,
         },
         'hashtag_batch'
       );
@@ -567,20 +702,8 @@ export async function enrichInstagramProfiles(): Promise<void> {
   const page = await context.newPage();
 
   try {
-    let loggedIn = await isLoggedIn(page);
-    if (!loggedIn) {
-      await loginWithCookies(context);
-      loggedIn = await isLoggedIn(page);
-    }
-    if (!loggedIn) {
-      loggedIn = await loginWithCredentials(page, context);
-    }
-    if (!loggedIn) {
-      console.error('[instagram] Cannot authenticate for enrichment');
-      return;
-    }
+    if (!(await authenticate(context, page))) return;
 
-    await dismissDialogs(page);
     let enriched = 0;
 
     for (const row of unenriched) {
@@ -604,10 +727,7 @@ export async function enrichInstagramProfiles(): Promise<void> {
         console.log(`[instagram] ✓ @${username} (${profile.followers} followers)`);
       }
 
-      await humanDelay(
-        CONFIG.delays.instagram.min,
-        CONFIG.delays.instagram.max
-      );
+      await humanDelay(CONFIG.delays.instagram.min, CONFIG.delays.instagram.max);
     }
 
     console.log(`[instagram] Enrichment done. ${enriched}/${unenriched.length} updated.`);
@@ -616,11 +736,12 @@ export async function enrichInstagramProfiles(): Promise<void> {
   }
 }
 
-// ─── One-time manual login utility ───────────────────────────────────────────
+// ─── Manual login utility ─────────────────────────────────────────────────────
 
 if (process.argv.includes('--login')) {
   (async () => {
     console.log('Opening browser for manual login...');
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
     const context = await chromium.launchPersistentContext(PROFILE_DIR, {
       headless: false,
       locale: 'fr-FR',
